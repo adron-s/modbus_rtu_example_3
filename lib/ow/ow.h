@@ -149,6 +149,7 @@ typedef struct __PACKED
   uint8_t                   last_zero;
   uint8_t                   last_device_flag;
   uint8_t                   rom_id[8];
+  uint8_t                   last_found_rom_id[8];
 
 } ow_search_t;
 #endif

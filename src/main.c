@@ -117,7 +117,7 @@ static void ds18b20_init_stage2(void)
 static void ds18b20_read_temp(void)
 {
 	uint8_t a;
-	int16_t temp_c[] = {0, 0, 0};
+	int16_t temp_c[] = {0, 0, 0, 0};
 
 	// Update ROM IDs for all devices
 	ds18b20_update_rom_id(&ds18);

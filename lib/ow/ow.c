@@ -835,7 +835,12 @@ __STATIC_FORCEINLINE void ow_state_search(ow_t *handle)
       if (bit_number < handle->search.last_discrepancy)
       {
         /* repeat previous path */
-        bit_choice = (handle->search.rom_id[handle->buf.bit_idx / 8] >> (handle->buf.bit_idx % 8)) & 0x01;
+				if (handle->rom_id_found > 0) {
+					bit_choice = (handle->search.last_found_rom_id[handle->buf.bit_idx / 8] >> (handle->buf.bit_idx % 8)) & 0x01;
+				} else {
+					handle->error = OW_ERR_ROM_ID;
+					ow_stop(handle);
+				}
       }
       else if (bit_number == handle->search.last_discrepancy)
       {
@@ -895,12 +900,14 @@ __STATIC_FORCEINLINE void ow_state_search(ow_t *handle)
         if (handle->rom_id_filter == 0)
         {
           memcpy(&handle->rom_id[handle->rom_id_found], handle->search.rom_id, 8);
+          memcpy(&handle->search.last_found_rom_id, handle->search.rom_id, 8);
           handle->rom_id_found++;
         }
         /* Selected ROM ID Filter */
         else if (handle->rom_id_filter == handle->search.rom_id[0])
         {
           memcpy(&handle->rom_id[handle->rom_id_found], handle->search.rom_id, 8);
+          memcpy(&handle->search.last_found_rom_id, handle->search.rom_id, 8);
           handle->rom_id_found++;
         }
       }
