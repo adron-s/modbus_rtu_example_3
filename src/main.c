@@ -15,6 +15,8 @@
 #define ONEWIRE_PIN GPIO_PIN_5
 #define FANS_PWR_CTRL_PIN GPIO_PIN_13
 #define FAN2_PWM_PIN GPIO_PIN_6
+#define FAN2_TAH_PIN GPIO_PIN_7
+#define FAN2_TIM14_FREQ 10000 // 10khz
 
 #define FAN_PWN_MAX_SPEED_VAL 0 //0
 #define FAN_PWN_MIN_SPEED_VAL 1920 //1520
@@ -32,16 +34,41 @@
 #define INA226_CURRENT_25MOHM_LSB  0.0002f // 25mΩ / 2 shunt = 0.0002
 #define INA226_CURRENT_100MOHM_LSB 0.000025f // 100mΩ shunt
 
-volatile uint32_t capture_counter = 0;
-volatile uint32_t last_capture = 0;
-volatile uint32_t tach_period_us = 0;
+typedef struct {
+	uint32_t capture_counter;
+	uint32_t last_capture;
+	uint32_t tach_period_ticks;
+	uint32_t rpm;
+} Fan_Data_t;
 
+volatile Fan_Data_t fan2;
 ds18b20_t ds18;
 
 typedef struct {
-    float voltage; // Volts
-    float current; // Amps
-} INA226_Data;
+	float voltage; // Volts
+	float current; // Amps
+} INA226_Data_t;
+
+void SystemClock_Config(void);
+static void MX_GPIO_Init(void);
+static void MX_GPIO_Repurpose_SWDIO(void);
+static void MX_USART2_UART_Init(void);
+static void MX_I2C1_Init(void);
+//static void I2C_Scan_Specific(void);
+
+UART_HandleTypeDef huart2; // Handle for UART2 configuration
+I2C_HandleTypeDef hi2c1;
+
+void MX_TIM1_Init(void);
+void MX_TIM3_Init(void);
+void MX_TIM14_Init(void);
+void ds18_tim_cb(TIM_HandleTypeDef *htim);
+void ds18_tim_test_cb(TIM_HandleTypeDef *htim);
+void delay_ms(uint32_t ms);
+
+TIM_HandleTypeDef htim1;
+TIM_HandleTypeDef htim3;
+TIM_HandleTypeDef htim14;
 
 /**
  * @brief  Writes a 16-bit value to an INA226 register
@@ -83,7 +110,7 @@ HAL_StatusTypeDef INA226_Init(uint16_t addr) {
 	return HAL_I2C_Master_Transmit(&hi2c1, (addr << 1), data, 3, 100);
 }
 
-static HAL_StatusTypeDef INA226_ReadData(uint16_t addr, INA226_Data *data)
+static HAL_StatusTypeDef INA226_ReadData(uint16_t addr, INA226_Data_t *data)
 {
 	uint8_t reg;
 	int16_t raw;
@@ -123,7 +150,7 @@ static void Monitor_All_Sensors(void)
 	HAL_StatusTypeDef ret;
 	uint16_t sensor_addrs[] = {0x40, 0x41, 0x42, 0x43, 0x48};
 	static uint8_t is_init_needed[] = {1, 1, 1, 1, 1};
-	INA226_Data sensor_readings;
+	INA226_Data_t sensor_readings;
 
 	for (int i = 0; i < 5; i++) {
 		if (is_init_needed[i]) {
@@ -247,18 +274,17 @@ void do_test_timer(void)
 
 }
 
-uint32_t FAN2_GetRPM(void)
+/*
+	Enables timer interrupts for a short period, waits for two pulses
+	from the fan tachometer, and then disables interrupts. Knowing this
+	time between the two pulses, the current RPM is then calculated.
+*/
+static void do_FAN2_RPM_measure(void)
 {
-	uint32_t ticks = tach_period_us;  // actually ticks, not microseconds
-	if (ticks == 0) {
-		return 0;
-	}
+	uint32_t ticks;
+	uint32_t start_tick;
+	uint32_t last_capture_counter;
 
-	return 300000UL / ticks;   // 10 kHz timer, 2 pulses per rev
-}
-
-void do_FAN2_RPM_measure(void)
-{
 	HAL_NVIC_DisableIRQ(TIM14_IRQn);
 	/* Hardware Barrier (CRITICAL) */
 	/* This ensures the 'Disable' command is fully completed in the CPU
@@ -266,24 +292,36 @@ void do_FAN2_RPM_measure(void)
 	__DSB();
 	__ISB();
 
-	/** --- START CRITICAL SECTION --- **/
-	last_capture = 0;
-	tach_period_us = 0;
-	/** --- END CRITICAL SECTION --- **/
+	/* --- START CRITICAL SECTION --- */
+	last_capture_counter = 0;
+	memset((void *)&fan2, 0x0, sizeof(fan2));
+	/* --- END CRITICAL SECTION --- */
 	HAL_NVIC_EnableIRQ(TIM14_IRQn);
 
-	uint32_t start_tick = HAL_GetTick();
-	while (tach_period_us == 0) {
-		/* If no pulse for 200ms (5Hz / 150 RPM), the fan is likely stopped. */
-		if ((HAL_GetTick() - start_tick) > 200) {
-			printf("%s::fan is stuck! emergency break!\n", __func__);
-  		break;
+	start_tick = HAL_GetTick();
+	while (fan2.tach_period_ticks == 0) {
+		if (fan2.capture_counter != last_capture_counter) {
+			last_capture_counter = fan2.capture_counter;
+			start_tick = HAL_GetTick();
+		} else {
+			/* If no pulse for 200ms (300 RPM), the fan is likely stopped. */
+			if ((HAL_GetTick() - start_tick) > 200) {
+				printf("%s::fan is stuck! emergency break!\n", __func__);
+  			break;
+			}
     }
 	}
 
 	HAL_NVIC_DisableIRQ(TIM14_IRQn);
 	__DSB();
 	__ISB();
+
+	ticks = fan2.tach_period_ticks;  // actually ticks, not microseconds
+	if (ticks == 0) {
+		fan2.rpm = 0;
+	} else {
+		fan2.rpm = 30UL * FAN2_TIM14_FREQ / ticks;   // 60secs / 2 = 30, 2 pulses per revolution
+	}
 }
 
 int main(void)
@@ -291,7 +329,6 @@ int main(void)
 	int swdio_need_repurpose = 1;
 	int fan2_pwm_inc_step = 100;
 	int fan2_pwm_val = FAN2_PWM_START_VAL;
-	uint32_t last_capture_counter = 0;
 
 	/* MCU Configuration part */
 	HAL_Init(); // initialize the HAL Library
@@ -325,7 +362,6 @@ int main(void)
 		Monitor_All_Sensors();
 		ds18b20_read_temp();
 
-
 		if (0) {
 			if ((loop_count & 0x03) == 0) {
 				if (swdio_need_repurpose) {
@@ -353,15 +389,10 @@ int main(void)
 				printf("Setting TIM3->CH1 PWM val := %d\n", val);
 			}
 
-			uint32_t cur_capture_count = capture_counter;
 			/* We start the RPM measurement process (timer interrupt handler) only for a moment,
 				 so as not to interfere with the operation of other systems. */
 			do_FAN2_RPM_measure();
-			printf("Current RPM := %u, capture_counter delta := %u\n",
-				FAN2_GetRPM(), cur_capture_count - last_capture_counter);
-			// printf("RAW value1: %u\n", HAL_TIM_ReadCapturedValue(&htim14, TIM_CHANNEL_1));
-			// printf("RAW value2: %u\n", TIM14->CNT);
-			last_capture_counter = cur_capture_count;
+			printf("Current RPM := %lu\n", fan2.rpm);
 		}
 	}
 }
@@ -403,16 +434,16 @@ void HAL_I2C_MspInit(I2C_HandleTypeDef* hi2c)
   }
 }
 
-static void I2C_Scan_Specific(void)
-{
-  for (uint8_t target_address = 1; target_address < 128; target_address++) {
-    // HAL_I2C_IsDeviceReady expects (address << 1)
-    if (HAL_I2C_IsDeviceReady(&hi2c1, (target_address << 1), 3, 10) == HAL_OK) {
-      // Device found! You can add your logic here (e.g., UART print)
-			printf("Device with address: 0x%x is found!\n", target_address);
-    }
-  }
-}
+// static void I2C_Scan_Specific(void)
+// {
+//   for (uint8_t target_address = 1; target_address < 128; target_address++) {
+//     // HAL_I2C_IsDeviceReady expects (address << 1)
+//     if (HAL_I2C_IsDeviceReady(&hi2c1, (target_address << 1), 3, 10) == HAL_OK) {
+//       // Device found! You can add your logic here (e.g., UART print)
+// 			printf("Device with address: 0x%x is found!\n", target_address);
+//     }
+//   }
+// }
 
 /**
 	* USART2 GPIO Configuration.
@@ -543,21 +574,21 @@ static void MX_GPIO_Init(void)
 	HAL_GPIO_Init(ONEWIRE_PORT, &GPIO_InitStruct);
 
 	/* TIM3 GPIO Configuration
-  		PA6     ------> TIM3_CH1
-  */
+  		FAN2_PWM_PIN -> TIM3_CH1 PWM Output (AF1) */
 	GPIO_InitStruct.Pin = FAN2_PWM_PIN;
 	GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;       // Alternate Function Push-Pull
 	GPIO_InitStruct.Pull = GPIO_NOPULL;
 	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-	GPIO_InitStruct.Alternate = GPIO_AF1_TIM3;    // THIS IS THE AF1 ASSIGNMENT
+	GPIO_InitStruct.Alternate = GPIO_AF1_TIM3;
 	HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-	/* Configure PA7 for TIM14_CH1 Input Capture (AF4) */
-	GPIO_InitStruct.Pin = GPIO_PIN_7;
-	GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;       // Alternate Function Push-Pull
-	GPIO_InitStruct.Pull = GPIO_PULLUP;          // Fan tachometers are open-collector
+	/* TIM14 GPIO Configuration
+  		FAN2_TAH_PIN -> TIM14_CH1 Input Capture (AF4) */
+	GPIO_InitStruct.Pin = FAN2_TAH_PIN;
+	GPIO_InitStruct.Mode = GPIO_MODE_AF_PP; // alternate Function Push-Pull
+	GPIO_InitStruct.Pull = GPIO_PULLUP; // fan tachometers are open-collector
 	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-	GPIO_InitStruct.Alternate = GPIO_AF4_TIM14;    // Mapping PA7 to TIM14_CH1
+	GPIO_InitStruct.Alternate = GPIO_AF4_TIM14;
 	HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 }
 
@@ -585,7 +616,7 @@ void MX_TIM1_Init(void)
      TimerClock is SystemCoreClock for TIM1 on F0 (APB prescaler = 1 typically).
   */
   uint32_t prescaler = (SystemCoreClock / 1000000U) - 1U;
-	printf("MX_TIM1_Init::SystemCoreClock: %u, prescaler: %u\n",
+	printf("MX_TIM1_Init::SystemCoreClock: %lu, prescaler: %lu\n",
 		SystemCoreClock, prescaler);
 
   htim1.Instance = TIM1;
@@ -599,8 +630,8 @@ void MX_TIM1_Init(void)
 		printf("Error calling HAL_TIM_Base_Init !!!\n");
 	}
 
-	/* Configure the NVIC for TIM1 Update Interrupt. */
-	/* 0 - high priority (1-Wire timing is critical) ! */
+	/* Setup the priority and enable the interrupt for the timer.
+		 0 - high priority (1-Wire timing is critical) ! */
 	HAL_NVIC_SetPriority(TIM1_BRK_UP_TRG_COM_IRQn, 0, 0);
 	HAL_NVIC_EnableIRQ(TIM1_BRK_UP_TRG_COM_IRQn);
 
@@ -619,30 +650,34 @@ void fan2_RPM_callback(TIM_HandleTypeDef *htim) {
 	if (htim->Channel == HAL_TIM_ACTIVE_CHANNEL_1) {
 		uint32_t now = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
 
-		if (last_capture != 0) {
-			tach_period_us = (now >= last_capture)
-				? (now - last_capture)
-				: (0xFFFF - last_capture + now);
+		if (fan2.last_capture != 0) {
+			fan2.tach_period_ticks = (now >= fan2.last_capture)
+				? (now - fan2.last_capture)
+				: (0xFFFF - fan2.last_capture + now);
 		}
-		last_capture = now;
-		capture_counter++;
+		fan2.last_capture = now;
+		fan2.capture_counter++;
 	}
 }
 
+/*
+	Init TIM3 timer - this timer is used to generate
+	a PWM signal for FAN2.
+*/
 void MX_TIM3_Init(void)
 {
+	HAL_StatusTypeDef ret;
 	TIM_OC_InitTypeDef sConfigOC = {0};
 
 	/* Enable TIM3 clock */
 	__HAL_RCC_TIM3_CLK_ENABLE();
 
 	htim3.Instance = TIM3;
-  htim3.Init.Prescaler = 0;
+  htim3.Init.Prescaler = 0; // 48 MHz - the current CPU frequency
   htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim3.Init.Period = 1919; // Sets frequency to 25kHz (48MHz / 1920)
+  htim3.Init.Period = 1919; // Sets frequency to 25kHz - 25 kHz is the Intel/AMD standard for 4‑wire PWM CPU fans (48MHz / 1920)
   htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   HAL_TIM_PWM_Init(&htim3);
-  HAL_TIM_IC_Init(&htim3);
 
   sConfigOC.OCMode = TIM_OCMODE_PWM1;
   sConfigOC.Pulse = FAN2_PWM_START_VAL;
@@ -650,13 +685,16 @@ void MX_TIM3_Init(void)
   sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
   HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_1);
 
-	if (HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1) != HAL_OK) {
-		printf("Error calling HAL_TIM_PWM_Start for TIM3->chan1 !!!\n");
-	} else {
-		printf("TIM3->chan1 PWM Start is OK\n");
+	ret = HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
+  if (ret != HAL_OK) {
+		printf("%s::HAL_TIM_PWM_Start return error: %d !!!\n", __func__, ret);
 	}
 }
 
+/*
+	Init TIM14 timer - this timer is used to read the tachometer
+	readings from FAN2.
+*/
 void MX_TIM14_Init(void)
 {
 	HAL_StatusTypeDef ret;
@@ -667,33 +705,33 @@ void MX_TIM14_Init(void)
 
 	htim14.Instance = TIM14;
 	htim14.Init.Prescaler = 0;
-	//htim14.Init.Prescaler = (SystemCoreClock / 1000000) - 1; // 1 MHz timer
-	htim14.Init.Prescaler = (SystemCoreClock / 10000) - 1; // 10 kHz timer
+	htim14.Init.Prescaler = (SystemCoreClock / FAN2_TIM14_FREQ) - 1;
   htim14.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim14.Init.Period = 0xFFFF; // 65,535us max period (~65ms)
+	/* 65535 × 100 µs = 6.5535 seconds. overflow = 6.55 seconds at 10 kHz. */
+  htim14.Init.Period = 0xFFFF;
 	htim14.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-	HAL_TIM_Base_Init(&htim14);
   HAL_TIM_IC_Init(&htim14);
 
-	// Configure Channel 1 for Input Capture on PA7
+	/* Configure Channel 1 for Input Capture on FAN2_TAH_PIN. */
 	sConfigIC.ICPolarity = TIM_ICPOLARITY_RISING;
 	sConfigIC.ICSelection = TIM_ICSELECTION_DIRECTTI;
 	sConfigIC.ICPrescaler = TIM_ICPSC_DIV1;
-	sConfigIC.ICFilter = 10; // Filter noise (adjust 0-15 as needed)
+	sConfigIC.ICFilter = 10; // filter noise (adjust 0-15 as needed)
 	HAL_TIM_IC_ConfigChannel(&htim14, &sConfigIC, TIM_CHANNEL_1);
 
-	// Enable the interrupt for the timer
-	/* 3 - lower priority (tachometer is non-critical) */
+	/* Setup the priority and enable the interrupt for the timer.
+		 3 - lower priority (tachometer is non-critical) ! */
 	HAL_NVIC_SetPriority(TIM14_IRQn, 3, 0);
-	//HAL_NVIC_EnableIRQ(TIM14_IRQn);
+	//HAL_NVIC_EnableIRQ(TIM14_IRQn); // another function enables this interrupt
 
 	ret = HAL_TIM_RegisterCallback(&htim14, HAL_TIM_IC_CAPTURE_CB_ID, fan2_RPM_callback);
 	if (ret != HAL_OK) {
-		printf("HAL_TIM_RegisterCallback return error: %d !!!\n", ret);
+		printf("%s::HAL_TIM_RegisterCallback return error: %d !!!\n", __func__, ret);
 	}
 
-  if (HAL_TIM_IC_Start_IT(&htim14, TIM_CHANNEL_1) != HAL_OK) {
-		printf("Error calling HAL_TIM_IC_Start_IT for TIM14->chan1 !!!\n");
+	ret = HAL_TIM_IC_Start_IT(&htim14, TIM_CHANNEL_1);
+  if (ret != HAL_OK) {
+		printf("%s::HAL_TIM_IC_Start_IT return error: %d !!!\n", __func__, ret);
 	}
 }
 
