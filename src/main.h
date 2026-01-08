@@ -4,6 +4,7 @@
 
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
+static void MX_GPIO_Repurpose_SWDIO(void);
 static void MX_USART2_UART_Init(void);
 static void MX_I2C1_Init(void);
 static void I2C_Scan_Specific(void);
