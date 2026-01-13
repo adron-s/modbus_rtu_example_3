@@ -28,6 +28,8 @@ volatile uint16_t uart2_rx_last_pos = 0; // last processed position
 nmbs_t nmbs;
 const uint8_t nmbs_id = 0x01;
 
+int loop_count = 0;
+
 void modbus_server_init(void)
 {
 	nmbs_server_init(&nmbs, nmbs_id);
@@ -80,7 +82,22 @@ void do_uart2_poll(void)
 	}
 }
 
-int loop_count = 0;
+void set_led_pin_state(int pin_state)
+{
+	if (pin_state) {
+		//loop_count++;
+		HAL_GPIO_WritePin(LED_GPIO_PORT, LED_PIN, GPIO_PIN_SET);
+	} else {
+		HAL_GPIO_WritePin(LED_GPIO_PORT, LED_PIN, GPIO_PIN_RESET);
+	}
+}
+
+int get_led_pin_state(void)
+{
+	GPIO_PinState pin_state = HAL_GPIO_ReadPin(LED_GPIO_PORT, LED_PIN);
+	return pin_state == GPIO_PIN_SET;
+}
+
 int main(void)
 {
 	/* MCU Configuration part */
@@ -103,16 +120,16 @@ int main(void)
 	/* Infinite loop. */
 	while (1) {
 		// Turn the LED off.
-		HAL_GPIO_WritePin(LED_GPIO_PORT, LED_PIN, GPIO_PIN_RESET);
-		HAL_Delay(100); // wait 500 milliseconds
+		//set_led_pin_state(GPIO_PIN_RESET);
+		// HAL_Delay(100); // wait 500 milliseconds
 		// Turn the LED on.
-		HAL_GPIO_WritePin(LED_GPIO_PORT, LED_PIN, GPIO_PIN_SET);
-		HAL_Delay(100); // wait 500 milliseconds
+		// set_led_pin_state(GPIO_PIN_SET);
+		// HAL_Delay(100); // wait 500 milliseconds
 
 		nmbs_server_poll(&nmbs);
 
 		printf("Hello from STM32! Loop count is: %d\n", loop_count);
-		loop_count++;
+		//loop_count++;
 		//do_uart2_poll();
 	}
 }

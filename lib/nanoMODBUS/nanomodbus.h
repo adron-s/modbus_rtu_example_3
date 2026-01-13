@@ -43,6 +43,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
+#include "nmbs/config.h"
 
 #ifdef __cplusplus
 extern "C" {
