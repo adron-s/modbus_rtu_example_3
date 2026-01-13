@@ -128,7 +128,7 @@ int main(void)
 
 		nmbs_server_poll(&nmbs);
 
-		printf("Hello from STM32! Loop count is: %d\n", loop_count);
+		//printf("Hello from STM32! Loop count is: %d\n", loop_count);
 		//loop_count++;
 		//do_uart2_poll();
 	}

@@ -4,6 +4,10 @@
 #include <stdio.h>
 #include <string.h>
 
+uint8_t modbus_file_send_data_recv_buf[MODBUS_FILE_SEND_DATA_RECV_BUF_SIZE];
+uint8_t *modbus_file_send_data_recv_buf_ptr = modbus_file_send_data_recv_buf;
+uint32_t modbus_file_send_data_recv_buf_rest = 0;
+
 static int32_t read_serial(uint8_t *buf, uint16_t count,
 			   int32_t byte_timeout_ms, void *arg);
 static int32_t write_serial(const uint8_t *buf, uint16_t count,
@@ -17,6 +21,8 @@ static nmbs_error server_write_single_register(uint16_t, uint16_t, uint8_t,
 static nmbs_error server_write_multiple_registers(uint16_t, uint16_t,
 						  const uint16_t *, uint8_t,
 						  void *);
+static nmbs_error server_write_file_record(uint16_t, uint16_t, const uint16_t *,
+					   uint16_t, uint8_t, void *);
 
 nmbs_error nmbs_server_init(nmbs_t *nmbs, const uint8_t nmbs_id)
 {
@@ -32,6 +38,7 @@ nmbs_error nmbs_server_init(nmbs_t *nmbs, const uint8_t nmbs_id)
 	cb.read_holding_registers = server_read_holding_registers;
 	cb.write_single_register = server_write_single_register;
 	cb.write_multiple_registers = server_write_multiple_registers;
+	cb.write_file_record = server_write_file_record;
 
 	nmbs_error status = nmbs_server_create(nmbs, nmbs_id, &conf, &cb);
 	if (status != NMBS_ERROR_NONE) {
@@ -82,7 +89,8 @@ static nmbs_error server_write_multiple_registers(uint16_t address,
 						  const uint16_t *registers,
 						  uint8_t unit_id, void *arg)
 {
-	printf("%s, address: %d, quantity: %d, unit_id: %d\n", __func__, address, quantity, unit_id);
+	printf("%s, address: %d, quantity: %d, unit_id: %d\n", __func__,
+	       address, quantity, unit_id);
 	for (size_t i = 0; i < quantity; i++) {
 		uint16_t cur_reg = address + i;
 
@@ -100,6 +108,94 @@ static nmbs_error server_write_multiple_registers(uint16_t address,
 		}
 	}
 	return NMBS_ERROR_NONE;
+}
+
+static nmbs_error server_write_file_record(uint16_t file_number,
+					   uint16_t record_number,
+					   const uint16_t *registers,
+					   uint16_t count, uint8_t unit_id,
+					   void *arg)
+{
+	printf(
+	    "%s, file_number: %d, record_number: %d, count: %d, unit_id: %d\n",
+	    __func__, file_number, record_number, count, unit_id);
+
+
+	if (record_number > MOBDUS_FILE_SEND_TAIL_REC_NUM) {
+		printf("ERROR: %s:: invalid record_number (%u) !!!\n", __func__, record_number);
+		return NMBS_ERROR_INVALID_REQUEST;
+	}
+
+	if (record_number == MOBDUS_FILE_SEND_HEAD_REC_NUM) { /* process the START chunk */
+		uint16_t buf[4];
+		modbus_file_send_header_t *hdr;
+
+		if (count != 4) {
+			printf("ERROR: %s:: HEAD->count (%u) != 4 !!!\n", __func__, count);
+			return NMBS_ERROR_INVALID_REQUEST;
+		}
+		for (int i = 0; i < count; i++) {
+			buf[i] = __REV16(registers[i]);
+		}
+		hdr = (void *)buf;
+		printf("%s::MOBDUS_FILE_SEND_HEAD_REC_NUM hdr->total_len: %lu, n_chunks: %lu\n",
+			__func__, hdr->total_len, hdr->n_chunks);
+
+		if (hdr->n_chunks > MOBDUS_FILE_SEND_HEAD_REC_NUM) {
+			printf("ERROR: %s:: hdr->n_chunks (%lu) > %u !!!\n", __func__, hdr->n_chunks, MOBDUS_FILE_SEND_HEAD_REC_NUM);
+			return NMBS_ERROR_INVALID_REQUEST;
+		}
+		if (hdr->total_len > MODBUS_FILE_SEND_DATA_RECV_BUF_SIZE) {
+			printf("ERROR: %s:: hdr->total_len (%lu) > %u !!!\n", __func__, hdr->total_len, MODBUS_FILE_SEND_DATA_RECV_BUF_SIZE);
+			return NMBS_ERROR_INVALID_REQUEST;
+		}
+
+		/* ESP32: check for prev modbus_file_send_data_recv_buf ptr and free it. */
+		/* ESP32: malloc the memory for modbus_file_send_data_recv_buf or use a static one. */
+
+		modbus_file_send_data_recv_buf_rest = hdr->total_len;
+		modbus_file_send_data_recv_buf_ptr = modbus_file_send_data_recv_buf;
+
+		return NMBS_ERROR_NONE;
+	} else if (record_number == MOBDUS_FILE_SEND_TAIL_REC_NUM) { /* process the END chunk */
+		if (modbus_file_send_data_recv_buf_ptr != NULL) {
+			modbus_file_send_data_recv_buf_ptr = NULL;
+			/* Processing collected data chunks. */
+			printf("%s\n", (char *)modbus_file_send_data_recv_buf);
+
+			/* ESP32: check for prev modbus_file_send_data_recv_buf ptr and free it. */
+			return NMBS_ERROR_NONE;
+		} else {
+			printf("ERROR: %s:: recv_buf_ptr is NULL !!!\n", __func__);
+			return NMBS_ERROR_INVALID_REQUEST;
+		}
+	} else { /* process the DATA (payload) chunk */
+		if (modbus_file_send_data_recv_buf_ptr == NULL) {
+			printf("ERROR: %s:: recv_buf_ptr is NULL !!!\n", __func__);
+			return NMBS_ERROR_INVALID_REQUEST;
+		}
+		if (count * 2 > MOBDUS_PAYLOAD_CHUNK_SIZE) {
+			printf("ERROR: %s:: count (%u) * 2 > %u !!!\n", __func__, count, MOBDUS_PAYLOAD_CHUNK_SIZE);
+			return NMBS_ERROR_INVALID_REQUEST;
+		}
+
+		uint16_t *ptr = (void *)modbus_file_send_data_recv_buf_ptr;
+		for (int i = 0; i < count; i++) {
+			if (modbus_file_send_data_recv_buf_rest < 2) {
+				printf("ERROR: %s:: recv_buf_rest (%lu) < 2 !!!\n",
+					__func__, modbus_file_send_data_recv_buf_rest);
+				return NMBS_ERROR_INVALID_REQUEST;
+			} else {
+				ptr[i] = __REV16(registers[i]);
+				modbus_file_send_data_recv_buf_rest -= 2;
+			}
+		}
+		modbus_file_send_data_recv_buf_ptr += count * 2;
+		return NMBS_ERROR_NONE;
+	}
+
+	printf("ERROR: %s:: еhe end of the function has been reached !!!\n", __func__);
+	return NMBS_ERROR_INVALID_REQUEST;
 }
 
 static int32_t read_serial(uint8_t *buf, uint16_t count,

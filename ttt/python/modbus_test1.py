@@ -1,9 +1,15 @@
 import time
+import struct
 from pymodbus.client import ModbusSerialClient
 from pymodbus.exceptions import ModbusException
 from pymodbus import pymodbus_apply_logging_config
+from pymodbus.pdu.file_message import FileRecord, ReadFileRecordRequest
 
 pymodbus_apply_logging_config("DEBUG")
+
+MOBDUS_PAYLOAD_CHUNK_SIZE = 240
+MOBDUS_FILE_SEND_HEAD_REC_NUM = 9998
+MOBDUS_FILE_SEND_TAIL_REC_NUM = 9999
 
 # Configure the Modbus RTU Client.
 client = ModbusSerialClient(
@@ -16,7 +22,7 @@ client = ModbusSerialClient(
 	retries=5
 )
 
-def read_rs485_data():
+def send_json_file_via_modbus(data: list[tuple[int, bytes]]) -> None:
 	# Attempt to connect to the serial port.
 	if not client.connect():
 		print("Failed to connect to the serial port")
@@ -24,36 +30,31 @@ def read_rs485_data():
 
 	try:
 		device_id = 0x01
-		led_state = 0
-		counter = None
-		# Read Holding Registers (Function Code 0x03)
-		# Parameters: address, count, slave (device ID)
-		while True:
-			for stage in range(2):
-				if stage == 0:
-					if counter is None:
-						continue
 
-					result = client.write_registers(address=0, values=[counter, led_state], device_id=device_id)
-					led_state = int(not led_state)
-					counter += 1
-				elif stage == 1:
-					result = client.read_holding_registers(address=0, count=2, device_id=device_id)
+		if len(data) > MOBDUS_FILE_SEND_TAIL_REC_NUM:
+			raise ValueError("data length is to big to bit into MODBUS regs!")
 
-				# Check for errors in the response
-				if result.isError():
-					print(f"Modbus Error: {result}")
-				else:
-					# result.registers contains the list of values
-					print(f"Success! Data: {result.registers}")
-					if counter is None and stage == 1 and result.registers:
-						counter = result.registers[0]
+		file_number = 10
+		for record_num, record_data in data:
+			records = [
+				FileRecord(
+					file_number=file_number,
+					record_number=record_num,
+					record_data=record_data
+				)
+			]
 
-			print("*" * 50)
-			time.sleep(1)
+			result = client.write_file_record(
+				records=records, device_id=device_id
+			)
 
-			# if counter is not None and led_state == 1:
-			# 	break
+			# Check for errors in the response
+			if result.isError():
+				print(f"Modbus Error: {result}")
+				break
+			else:
+				# result.registers contains the list of values
+				print(f"Success! Data: {result.registers}")
 
 	except ModbusException as e:
 		print(f"Communication exception: {e}")
@@ -61,5 +62,29 @@ def read_rs485_data():
 		# Always close the connection
 		client.close()
 
+def read_file_and_prep_data_list() -> list[tuple[int, bytes]]:
+	result: list[bytes] = [ ]
+	with open("./request.json", "rb") as f:
+		data = f.read()
+		total_len = len(data)
+		data = [data[i:i+MOBDUS_PAYLOAD_CHUNK_SIZE]
+			for i in range(0, len(data), MOBDUS_PAYLOAD_CHUNK_SIZE)]
+
+		n_chunks = len(data)
+
+		if len(data) > MOBDUS_FILE_SEND_HEAD_REC_NUM:
+			raise ValueError("data length is to big to bit into MODBUS regs!")
+
+		head = struct.pack("<II", total_len, n_chunks)
+		print(f"{total_len=}, {n_chunks=}, {head=}")
+		result = [
+			(MOBDUS_FILE_SEND_HEAD_REC_NUM, head),
+			*enumerate(data),
+			(MOBDUS_FILE_SEND_TAIL_REC_NUM, b'')
+		]
+
+		return result
+
 if __name__ == "__main__":
-	read_rs485_data()
+	data = read_file_and_prep_data_list()
+	send_json_file_via_modbus(data)
