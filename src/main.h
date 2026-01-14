@@ -12,27 +12,27 @@ int get_led_pin_state(void);
 
 /* Prints debug messages if debugging is enabled. */
 #if (defined DEBUG_PRINTF) && (DEBUG_PRINTF == 1)
-#define printd(format, args...)                                                \
+#define printd(format, args...)                                               	\
 	printf("%s(%d):: " format, __func__, __LINE__, ##args)
 #else
 #define printd(...)
 #endif
 /* Prints error messages if error debugging is enabled. */
 #if (defined DEBUG_PRINTE) && (DEBUG_PRINTE == 1)
-#define printe(format, args...)                                                \
+#define printe(format, args...)                                               	\
 	printf("!!! ERROR: %s(%d):: " format " !!!\n", __func__, __LINE__, ##args)
 #else
 #define printe(...)
 #endif
 
 /* Prints (byte by byte) the contents of the passed buffer of the given size. */
-#define data_print(buf, buf_size)                                              \
-	{                                                                      \
-		printf("%s:: data:", __func__);                                \
-		for (int i = 0; i < buf_size; i++) {                           \
-			printf(" %02X", buf[i]);                               \
-		}                                                              \
-		printf("\n");                                                  \
+#define data_print(buf, buf_size)                                              	\
+	{                                                                      				\
+		printf("%s:: data:", __func__);                                							\
+		for (int i = 0; i < buf_size; i++) {                           							\
+			printf(" %02X", buf[i]);                               										\
+		}                                                              							\
+		printf("\n");                                                  							\
 	}
 
 /*
