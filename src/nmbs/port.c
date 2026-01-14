@@ -168,7 +168,7 @@ modbus_file_send_process_tail_chunk(modbus_file_send_data_ctx_t *ctx)
 			/* All data has been received - we are passing it on for
 			 * the next processing. */
 			ctx->recv_buf = NULL;
-			printd("%s\n", recv_buf);
+			printf("%s\n", recv_buf);
 			/* TODO: free(recv_buf) if necessary !!! */
 			return NMBS_ERROR_NONE; /* all is done ok */
 		} else {

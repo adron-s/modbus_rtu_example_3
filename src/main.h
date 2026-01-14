@@ -6,19 +6,19 @@ void set_led_pin_state(int);
 int get_led_pin_state(void);
 
 /* Debug control. */
-#define DEBUG_PRINTF true
-#define DEBUG_PRINTE true
-#define DEBUG_SERIAL_DATA_FLOWS true
+#define DEBUG_PRINTF 1
+#define DEBUG_PRINTE 1
+#define DEBUG_SERIAL_DATA_FLOWS 1
 
 /* Prints debug messages if debugging is enabled. */
-#if DEBUG_PRINTF == true
+#if (defined DEBUG_PRINTF) && (DEBUG_PRINTF == 1)
 #define printd(format, args...)                                                \
 	printf("%s(%d):: " format, __func__, __LINE__, ##args)
 #else
 #define printd(...)
 #endif
 /* Prints error messages if error debugging is enabled. */
-#if DEBUG_PRINTE == true
+#if (defined DEBUG_PRINTE) && (DEBUG_PRINTE == 1)
 #define printe(format, args...)                                                \
 	printf("!!! ERROR: %s(%d):: " format " !!!\n", __func__, __LINE__, ##args)
 #else
