@@ -10,3 +10,4 @@ PointerAlignment: Right
 AlignConsecutiveAssignments: false
 AlignConsecutiveDeclarations: false
 AlignTrailingComments: false
+IndentCaseLabels: true
